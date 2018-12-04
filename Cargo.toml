@@ -1,0 +1,17 @@
+[package]
+name = "proxylab-rs"
+version = "0.1.0"
+authors = ["pbzweihander <pbzweihander@gmail.com>"]
+autobins = false
+
+[dependencies]
+tokio = "0.1.13"
+futures = "0.1.25"
+
+[[bin]]
+name = "http"
+path = "src/http.rs"
+
+[[bin]]
+name = "proxy"
+path = "src/proxy.rs"
