@@ -88,7 +88,10 @@ fn doit(sock: TcpStream) -> impl Future<Item = (), Error = ()> {
                 });
             let request_line = result(request_line);
 
-            request_line.map(|r| (reader, r))
+            request_line.map(|r| {
+                println!("request:\n{} {} {}", r.0, r.1, r.2);
+                (reader, r)
+            })
         }).and_then(|(reader, (_, uri, _))| print_requesthdrs(reader).map(|_| uri))
         .and_then(|uri| parse_uri(&uri).ok_or(HttpError::Error("uri parsing failed".to_string())))
         .and_then(|filename| {
@@ -145,7 +148,7 @@ fn serve_static(
         io::write_all(writer, line)
             .and_then(|(writer, _)| io::write_all(writer, header))
             .and_then(|(writer, _)| io::copy(file, writer))
-            .map(|_| ())
+            .map(move |_| println!("file {} size {} served\n", filename, size))
     });
 
     write_future
@@ -223,5 +226,10 @@ fn client_error(
     io::write_all(writer, line)
         .and_then(|(writer, _)| io::write_all(writer, header))
         .and_then(|(writer, _)| io::write_all(writer, body))
-        .map(|_| ())
+        .map(move |_| {
+            println!(
+                "client error:\n{} {}\n{}: {}\n",
+                info.0, info.1, info.2, info.3
+            )
+        })
 }
