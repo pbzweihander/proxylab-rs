@@ -69,19 +69,23 @@ pub async fn print_requesthdrs(reader: impl AsyncRead + BufRead) {
 
 pub fn parse_uri(uri: &str, default_host: &str) -> Option<Uri> {
     lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^(http://)?(.*?)(/.*?)\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^(?:http://)?(.*?)(/.*?)\s*$").unwrap();
     }
 
     REGEX.captures(uri).and_then(|caps| {
         let host = caps
             .get(1)
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_else(|| default_host.to_string());
-        let port = caps
-            .get(2)
-            .and_then(|s| s.as_str().parse().ok())
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| default_host);
+        let mut split = host.split(':');
+
+        let host = split.next().unwrap_or_default().to_string();
+        let port = split
+            .next()
+            .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| 80);
-        let path = caps.get(3).map(|s| ".".to_string() + s.as_str());
+        let path = caps.get(2).map(|s| ".".to_string() + s.as_str());
+
         path.map(|p| Uri {
             host: host,
             port: port,
