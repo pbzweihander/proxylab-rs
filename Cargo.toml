@@ -1,5 +1,5 @@
 [package]
-name = "proxylab-rs"
+name = "proxylab"
 version = "0.1.0"
 authors = ["pbzweihander <pbzweihander@gmail.com>"]
 autobins = false

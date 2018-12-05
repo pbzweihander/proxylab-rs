@@ -340,7 +340,7 @@ version = "0.1.0-alpha.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "proxylab-rs"
+name = "proxylab"
 version = "0.1.0"
 dependencies = [
  "futures-preview 0.3.0-alpha.10 (registry+https://github.com/rust-lang/crates.io-index)",
