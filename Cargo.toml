@@ -7,6 +7,8 @@ autobins = false
 [dependencies]
 tokio = "0.1.13"
 futures = "0.1.25"
+regex = "1.1.0"
+lazy_static = "1.2.0"
 
 [[bin]]
 name = "http"
