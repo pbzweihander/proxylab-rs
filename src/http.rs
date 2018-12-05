@@ -1,38 +1,19 @@
 #![feature(async_await, await_macro, futures_api, pin, try_blocks)]
 
 extern crate futures;
-extern crate regex;
+extern crate proxylab;
 extern crate tokio;
-#[macro_use]
-extern crate lazy_static;
 
 use futures::compat::TokioDefaultSpawner;
-use futures::future::ready;
 use futures::task::SpawnExt;
 use futures::{compat::*, prelude::*};
-use regex::Regex;
+use proxylab::*;
 use std::env::args;
 use std::io::{BufRead, BufReader};
 use tokio::fs;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::{AsyncRead, AsyncWrite};
-
-enum HttpError {
-    IsDirectory(String),
-    Forbidden(String),
-    NotFound(String),
-    NotImplemented(String),
-    Error(String),
-}
-
-enum FileType {
-    Html,
-    Jpg,
-    Png,
-    Gif,
-    PlainText,
-}
 
 fn main() {
     let args = args().collect::<Vec<_>>();
@@ -104,8 +85,9 @@ async fn read_request(reader: impl AsyncRead + BufRead) -> Result<(String, u64),
     println!("request:\n{} {} {}", method, uri, version);
     await!(print_requesthdrs(reader));
 
-    let filename =
-        parse_uri(&uri).ok_or_else(|| HttpError::Error("uri parsing failed".to_string()))?;
+    let filename = parse_uri(&uri, "")
+        .map(|uri| uri.path)
+        .ok_or_else(|| HttpError::Error("uri parsing failed".to_string()))?;
     let metadata = {
         let filename = filename.clone();
         await!(fs::metadata(filename.clone()).compat()).map_err(move |e| match e.kind() {
@@ -148,99 +130,6 @@ async fn serve_static(
     let _ = await!(io::copy(file, writer).compat())?;
 
     println!("file {} size {} served\n", filename, size);
-
-    Ok(())
-}
-
-fn get_filetype(filename: &str) -> FileType {
-    if filename.ends_with(".html") {
-        FileType::Html
-    } else if filename.ends_with(".jpg") {
-        FileType::Jpg
-    } else if filename.ends_with(".png") {
-        FileType::Png
-    } else if filename.ends_with(".gif") {
-        FileType::Gif
-    } else {
-        FileType::PlainText
-    }
-}
-
-async fn print_requesthdrs(reader: impl AsyncRead + BufRead) {
-    let lines = io::lines(reader);
-
-    await!(lines
-        .compat()
-        .filter_map(|l| ready(l.ok()))
-        .take_while(|l| ready(!l.is_empty()))
-        .for_each(|l| ready(println!("{}", l))));
-
-    println!();
-}
-
-fn parse_uri(uri: &str) -> Option<String> {
-    lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^(?:http://)?(?:.*?)(/.*?)\s*$").unwrap();
-    }
-
-    REGEX
-        .captures(uri)
-        .and_then(|caps| caps.get(1))
-        .map(|s| ".".to_string() + s.as_str())
-}
-
-async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), io::Error> {
-    let info: (u16, String, String, String) = match e {
-        HttpError::Error(e) => (400, "Error".to_string(), "Error occured".to_string(), e),
-        HttpError::Forbidden(e) => (
-            403,
-            "Forbidden".to_string(),
-            "The requested file is forbidden".to_string(),
-            e,
-        ),
-        HttpError::IsDirectory(e) => (
-            403,
-            "Forbidden".to_string(),
-            "The requested file is a directory".to_string(),
-            e,
-        ),
-        HttpError::NotFound(e) => (
-            404,
-            "NotFound".to_string(),
-            "The requested file is not found".to_string(),
-            e,
-        ),
-        HttpError::NotImplemented(e) => (
-            501,
-            "NotImplemented".to_string(),
-            "The requested method is not implemented".to_string(),
-            e,
-        ),
-    };
-
-    let body = format!(
-        "<html><head><title>Mini Error</title></head><body bgcolor=ffffff>\r\n\
-         <b>{}: {}</b>\r\n\
-         <p>{}: {}\r\n\
-         <hr><em>Mini Web server</em></body></html>\r\n",
-        info.0, info.1, info.2, info.3,
-    );
-
-    let line = format!("HTTP/1.0 {} {}\r\n", info.0, info.1);
-
-    let header = format!(
-        "Content-type: text/html\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-
-    let (writer, _) = await!(io::write_all(writer, line).compat())?;
-    let (writer, _) = await!(io::write_all(writer, header).compat())?;
-    let _ = await!(io::write_all(writer, body).compat())?;
-
-    println!(
-        "client error:\n{} {}\n{}: {}\n",
-        info.0, info.1, info.2, info.3
-    );
 
     Ok(())
 }
