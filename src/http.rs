@@ -106,19 +106,20 @@ async fn read_request(reader: impl AsyncRead + BufRead) -> Result<(String, u64),
 
     let filename =
         parse_uri(&uri).ok_or_else(|| HttpError::Error("uri parsing failed".to_string()))?;
-    let filename1 = filename.clone();
-    let metadata =
+    let metadata = {
+        let filename = filename.clone();
         await!(fs::metadata(filename.clone()).compat()).map_err(move |e| match e.kind() {
             io::ErrorKind::NotFound => HttpError::NotFound(filename),
             io::ErrorKind::PermissionDenied => HttpError::Forbidden(filename),
             _ => HttpError::Error(format!("file metadata error: {:?}", e)),
-        })?;
+        })?
+    };
 
     if metadata.is_dir() {
-        return Err(HttpError::IsDirectory(filename1));
+        return Err(HttpError::IsDirectory(filename));
     }
 
-    Ok((filename1, metadata.len()))
+    Ok((filename, metadata.len()))
 }
 
 async fn serve_static(
