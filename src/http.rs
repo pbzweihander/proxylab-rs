@@ -105,13 +105,13 @@ fn doit(sock: TcpStream) -> impl Future<Item = (), Error = ()> {
                     if metadata.is_dir() {
                         err(HttpError::IsDirectory(filename))
                     } else {
-                        ok(filename)
+                        ok((filename, metadata.len()))
                     }
                 })
         });
 
-    let serve_future = reader_future.then(|uri| match uri {
-        Ok(uri) => Either::A(serve_static(writer, uri)),
+    let serve_future = reader_future.then(|file| match file {
+        Ok((filename, size)) => Either::A(serve_static(writer, filename, size)),
         Err(e) => Either::B(client_error(writer, e)),
     });
 
@@ -121,33 +121,32 @@ fn doit(sock: TcpStream) -> impl Future<Item = (), Error = ()> {
 fn serve_static(
     writer: impl AsyncWrite,
     filename: String,
+    size: u64,
 ) -> impl Future<Item = (), Error = io::Error> {
     let file_future = fs::File::open(filename.clone());
 
-    let write_future = file_future
-        .and_then(|file| io::read_to_end(file, vec![]))
-        .and_then(move |(_, body)| {
-            let file_type = get_filetype(&filename);
+    let write_future = file_future.and_then(move |file| {
+        let file_type = get_filetype(&filename);
 
-            let line = "HTTP/1.0 200 OK\r\n".to_string();
+        let line = "HTTP/1.0 200 OK\r\n".to_string();
 
-            let header = format!(
-                "Content-type: {}\r\nContent-Length: {}\r\n\r\n",
-                match file_type {
-                    FileType::Gif => "image/gif",
-                    FileType::Html => "text/html",
-                    FileType::Jpg => "image/jpg",
-                    FileType::PlainText => "text/plain",
-                    FileType::Png => "image/png",
-                },
-                body.len()
-            );
+        let header = format!(
+            "Content-type: {}\r\nContent-Length: {}\r\n\r\n",
+            match file_type {
+                FileType::Gif => "image/gif",
+                FileType::Html => "text/html",
+                FileType::Jpg => "image/jpg",
+                FileType::PlainText => "text/plain",
+                FileType::Png => "image/png",
+            },
+            size
+        );
 
-            io::write_all(writer, line)
-                .and_then(|(writer, _)| io::write_all(writer, header))
-                .and_then(|(writer, _)| io::write_all(writer, body))
-                .map(|_| ())
-        });
+        io::write_all(writer, line)
+            .and_then(|(writer, _)| io::write_all(writer, header))
+            .and_then(|(writer, _)| io::copy(file, writer))
+            .map(|_| ())
+    });
 
     write_future
 }
@@ -174,7 +173,7 @@ fn print_requesthdrs(
     lines
         .take_while(|l| ok(!l.is_empty()))
         .for_each(|l| ok(println!("{}", l)))
-        .map(|_| ())
+        .map(|_| println!(""))
         .map_err(|e| HttpError::Error(format!("header reading failed: {:?}", e)))
 }
 
