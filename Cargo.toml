@@ -3,10 +3,11 @@ name = "proxylab-rs"
 version = "0.1.0"
 authors = ["pbzweihander <pbzweihander@gmail.com>"]
 autobins = false
+edition = "2018"
 
 [dependencies]
 tokio = "0.1.13"
-futures = "0.1.25"
+futures-preview = { version = "0.3.0-alpha.10", features = [ "tokio-compat" ] }
 regex = "1.1.0"
 lazy_static = "1.2.0"
 

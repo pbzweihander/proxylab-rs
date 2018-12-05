@@ -1,17 +1,22 @@
+#![feature(async_await, await_macro, futures_api, pin, try_blocks)]
+
 extern crate futures;
 extern crate regex;
 extern crate tokio;
 #[macro_use]
 extern crate lazy_static;
 
-use futures::future::{err, ok, result, Either};
+use futures::compat::TokioDefaultSpawner;
+use futures::future::ready;
+use futures::task::SpawnExt;
+use futures::{compat::*, prelude::*};
 use regex::Regex;
 use std::env::args;
 use std::io::{BufRead, BufReader};
 use tokio::fs;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::*;
+use tokio::prelude::{AsyncRead, AsyncWrite};
 
 enum HttpError {
     IsDirectory(String),
@@ -40,144 +45,136 @@ fn main() {
     let port = port.unwrap();
     let addr = format!("0.0.0.0:{}", port).parse().unwrap();
 
-    let listener =
-        TcpListener::bind(&addr).expect(&format!("unable to bind TCP listener on {}", addr));
+    let listener = TcpListener::bind(&addr)
+        .unwrap_or_else(|e| panic!("unable to bind TCP listener on {}: {:?}", addr, e));
 
-    let server = listener
-        .incoming()
-        .map_err(|e| eprintln!("accept failed: {:?}", e))
-        .for_each(|sock| {
-            let handler = doit(sock);
+    let server = async {
+        let mut executor = TokioDefaultSpawner;
+        let mut incomings = listener
+            .incoming()
+            .compat()
+            .map_err(|e| eprintln!("accept failed: {:?}", e));
 
-            tokio::spawn(handler)
-        });
+        while let Some(Ok(stream)) = await!(incomings.next()) {
+            let handler = doit(stream);
+            let _ = executor
+                .spawn(handler)
+                .map_err(|e| eprintln!("spawn failed: {:?}", e));
+        }
+    };
+    let server = server.unit_error().boxed().compat();
 
     tokio::run(server);
 }
 
-fn doit(sock: TcpStream) -> impl Future<Item = (), Error = ()> {
-    let (reader, writer) = sock.split();
+async fn doit(stream: TcpStream) {
+    let (reader, writer) = stream.split();
     let reader = BufReader::new(reader);
 
-    let reader_future = io::read_until(reader, b'\n', vec![])
-        .map_err(|e| HttpError::Error(format!("read failed: {:?}", e)))
-        .and_then(|(reader, buf)| {
-            let line = String::from_utf8(buf)
-                .map_err(|e| HttpError::Error(format!("decode request failed: {:?}", e)));
+    let file_info = await!(read_request(reader));
 
-            let request_line = line
-                .and_then(|line| {
-                    let mut iter = line.split_whitespace();
-
-                    let method = iter.next();
-                    let uri = iter.next();
-                    let version = iter.next();
-
-                    method
-                        .and_then(|m| {
-                            uri.and_then(|u| {
-                                version.map(|v| (m.to_string(), u.to_string(), v.to_string()))
-                            })
-                        }).ok_or(HttpError::Error("request line parsing failed".to_string()))
-                }).and_then(|(method, uri, version)| {
-                    if method != "GET" {
-                        Err(HttpError::NotImplemented(method.to_string()))
-                    } else {
-                        Ok((method, uri, version))
-                    }
-                });
-            let request_line = result(request_line);
-
-            request_line.map(|r| {
-                println!("request:\n{} {} {}", r.0, r.1, r.2);
-                (reader, r)
-            })
-        }).and_then(|(reader, (_, uri, _))| print_requesthdrs(reader).map(|_| uri))
-        .and_then(|uri| parse_uri(&uri).ok_or(HttpError::Error("uri parsing failed".to_string())))
-        .and_then(|filename| {
-            let filename1 = filename.clone();
-            fs::metadata(filename.clone())
-                .map_err(move |e| {
-                    use io::ErrorKind;
-                    match e.kind() {
-                        ErrorKind::NotFound => HttpError::NotFound(filename1),
-                        ErrorKind::PermissionDenied => HttpError::Forbidden(filename1),
-                        _ => HttpError::Error(format!("file metadata error: {:?}", e)),
-                    }
-                }).and_then(move |metadata| {
-                    if metadata.is_dir() {
-                        err(HttpError::IsDirectory(filename))
-                    } else {
-                        ok((filename, metadata.len()))
-                    }
-                })
-        });
-
-    let serve_future = reader_future.then(|file| match file {
-        Ok((filename, size)) => Either::A(serve_static(writer, filename, size)),
-        Err(e) => Either::B(client_error(writer, e)),
-    });
-
-    serve_future.map_err(|e| eprintln!("io error: {:?}", e))
+    let _ = match file_info {
+        Ok((filename, size)) => await!(serve_static(writer, filename, size)),
+        Err(e) => await!(client_error(writer, e)),
+    }
+    .map_err(|e| eprintln!("io error: {:?}", e));
 }
 
-fn serve_static(
+async fn read_request(reader: impl AsyncRead + BufRead) -> Result<(String, u64), HttpError> {
+    let (reader, buf) = await!(io::read_until(reader, b'\n', vec![]).compat())
+        .map_err(|e| HttpError::Error(format!("read failed: {:?}", e)))?;
+
+    let line = String::from_utf8(buf)
+        .map_err(|e| HttpError::Error(format!("decode request failed: {:?}", e)))?;
+    let mut iter = line.split_whitespace();
+
+    let method = iter.next();
+    let uri = iter.next();
+    let version = iter.next();
+
+    let (method, uri, version) = method
+        .and_then(|m| {
+            uri.and_then(|u| version.map(|v| (m.to_string(), u.to_string(), v.to_string())))
+        })
+        .ok_or_else(|| HttpError::Error("request line parsing failed".to_string()))?;
+
+    if method != "GET" {
+        return Err(HttpError::NotImplemented(method.to_string()));
+    }
+    println!("request:\n{} {} {}", method, uri, version);
+    await!(print_requesthdrs(reader));
+
+    let filename =
+        parse_uri(&uri).ok_or_else(|| HttpError::Error("uri parsing failed".to_string()))?;
+    let filename1 = filename.clone();
+    let metadata =
+        await!(fs::metadata(filename.clone()).compat()).map_err(move |e| match e.kind() {
+            io::ErrorKind::NotFound => HttpError::NotFound(filename),
+            io::ErrorKind::PermissionDenied => HttpError::Forbidden(filename),
+            _ => HttpError::Error(format!("file metadata error: {:?}", e)),
+        })?;
+
+    if metadata.is_dir() {
+        return Err(HttpError::IsDirectory(filename1));
+    }
+
+    Ok((filename1, metadata.len()))
+}
+
+async fn serve_static(
     writer: impl AsyncWrite,
     filename: String,
     size: u64,
-) -> impl Future<Item = (), Error = io::Error> {
-    let file_future = fs::File::open(filename.clone());
+) -> Result<(), io::Error> {
+    let file = await!(fs::File::open(filename.clone()).compat())?;
+    let file_type = get_filetype(&filename);
 
-    let write_future = file_future.and_then(move |file| {
-        let file_type = get_filetype(&filename);
+    let line = "HTTP/1.0 200 OK\r\n".to_string();
+    let header = format!(
+        "Content-type: {}\r\nContent-Length: {}\r\n\r\n",
+        match file_type {
+            FileType::Gif => "image/gif",
+            FileType::Html => "text/html",
+            FileType::Jpg => "image/jpg",
+            FileType::PlainText => "text/plain",
+            FileType::Png => "image/png",
+        },
+        size
+    );
 
-        let line = "HTTP/1.0 200 OK\r\n".to_string();
+    let (writer, _) = await!(io::write_all(writer, line).compat())?;
+    let (writer, _) = await!(io::write_all(writer, header).compat())?;
+    let _ = await!(io::copy(file, writer).compat())?;
 
-        let header = format!(
-            "Content-type: {}\r\nContent-Length: {}\r\n\r\n",
-            match file_type {
-                FileType::Gif => "image/gif",
-                FileType::Html => "text/html",
-                FileType::Jpg => "image/jpg",
-                FileType::PlainText => "text/plain",
-                FileType::Png => "image/png",
-            },
-            size
-        );
+    println!("file {} size {} served\n", filename, size);
 
-        io::write_all(writer, line)
-            .and_then(|(writer, _)| io::write_all(writer, header))
-            .and_then(|(writer, _)| io::copy(file, writer))
-            .map(move |_| println!("file {} size {} served\n", filename, size))
-    });
-
-    write_future
+    Ok(())
 }
 
 fn get_filetype(filename: &str) -> FileType {
     if filename.ends_with(".html") {
-        return FileType::Html;
+        FileType::Html
     } else if filename.ends_with(".jpg") {
-        return FileType::Jpg;
+        FileType::Jpg
     } else if filename.ends_with(".png") {
-        return FileType::Png;
+        FileType::Png
     } else if filename.ends_with(".gif") {
-        return FileType::Gif;
+        FileType::Gif
     } else {
-        return FileType::PlainText;
+        FileType::PlainText
     }
 }
 
-fn print_requesthdrs(
-    reader: impl AsyncRead + BufRead,
-) -> impl Future<Item = (), Error = HttpError> {
+async fn print_requesthdrs(reader: impl AsyncRead + BufRead) {
     let lines = io::lines(reader);
 
-    lines
-        .take_while(|l| ok(!l.is_empty()))
-        .for_each(|l| ok(println!("{}", l)))
-        .map(|_| println!(""))
-        .map_err(|e| HttpError::Error(format!("header reading failed: {:?}", e)))
+    await!(lines
+        .compat()
+        .filter_map(|l| ready(l.ok()))
+        .take_while(|l| ready(!l.is_empty()))
+        .for_each(|l| ready(println!("{}", l))));
+
+    println!();
 }
 
 fn parse_uri(uri: &str) -> Option<String> {
@@ -191,19 +188,31 @@ fn parse_uri(uri: &str) -> Option<String> {
         .map(|s| ".".to_string() + s.as_str())
 }
 
-fn client_error(
-    writer: impl AsyncWrite,
-    e: HttpError,
-) -> impl Future<Item = (), Error = io::Error> {
-    let info = match e {
-        HttpError::Error(e) => (400, "Error", "Error occured", e),
-        HttpError::Forbidden(e) => (403, "Forbidden", "The requested file is forbidden", e),
-        HttpError::IsDirectory(e) => (403, "Forbidden", "The requested file is a directory", e),
-        HttpError::NotFound(e) => (404, "NotFound", "The requested file is not found", e),
+async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), io::Error> {
+    let info: (u16, String, String, String) = match e {
+        HttpError::Error(e) => (400, "Error".to_string(), "Error occured".to_string(), e),
+        HttpError::Forbidden(e) => (
+            403,
+            "Forbidden".to_string(),
+            "The requested file is forbidden".to_string(),
+            e,
+        ),
+        HttpError::IsDirectory(e) => (
+            403,
+            "Forbidden".to_string(),
+            "The requested file is a directory".to_string(),
+            e,
+        ),
+        HttpError::NotFound(e) => (
+            404,
+            "NotFound".to_string(),
+            "The requested file is not found".to_string(),
+            e,
+        ),
         HttpError::NotImplemented(e) => (
             501,
-            "NotImplemented",
-            "The requested method is not implemented",
+            "NotImplemented".to_string(),
+            "The requested method is not implemented".to_string(),
             e,
         ),
     };
@@ -223,13 +232,14 @@ fn client_error(
         body.len()
     );
 
-    io::write_all(writer, line)
-        .and_then(|(writer, _)| io::write_all(writer, header))
-        .and_then(|(writer, _)| io::write_all(writer, body))
-        .map(move |_| {
-            println!(
-                "client error:\n{} {}\n{}: {}\n",
-                info.0, info.1, info.2, info.3
-            )
-        })
+    let (writer, _) = await!(io::write_all(writer, line).compat())?;
+    let (writer, _) = await!(io::write_all(writer, header).compat())?;
+    let _ = await!(io::write_all(writer, body).compat())?;
+
+    println!(
+        "client error:\n{} {}\n{}: {}\n",
+        info.0, info.1, info.2, info.3
+    );
+
+    Ok(())
 }
