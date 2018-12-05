@@ -8,12 +8,16 @@ extern crate lazy_static;
 
 pub mod cache;
 
-use futures::future::ready;
-use futures::{compat::*, prelude::*};
+use futures::{
+    future::ready,
+    {compat::*, prelude::*},
+};
 use regex::Regex;
 use std::io::BufRead;
-use tokio::io;
-use tokio::prelude::{AsyncRead, AsyncWrite};
+use tokio::{
+    io,
+    prelude::{AsyncRead, AsyncWrite},
+};
 
 pub enum HttpError {
     IsDirectory(String),

@@ -4,16 +4,17 @@ extern crate futures;
 extern crate proxylab;
 extern crate tokio;
 
-use futures::compat::TokioDefaultSpawner;
-use futures::task::SpawnExt;
-use futures::{compat::*, prelude::*};
+use futures::{compat::*, prelude::*, task::SpawnExt};
 use proxylab::*;
-use std::env::args;
-use std::io::{BufRead, BufReader};
-use tokio::fs;
-use tokio::io;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::{AsyncRead, AsyncWrite};
+use std::{
+    env::args,
+    io::{BufRead, BufReader},
+};
+use tokio::{
+    fs, io,
+    net::{TcpListener, TcpStream},
+    prelude::{AsyncRead, AsyncWrite},
+};
 
 fn main() {
     let args = args().collect::<Vec<_>>();
