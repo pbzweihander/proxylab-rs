@@ -10,11 +10,11 @@ pub mod cache;
 
 use futures::{
     future::ready,
-    stream::{iter, unfold},
+    stream::iter,
     {compat::*, prelude::*},
 };
 use regex::Regex;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use tokio::{
     io,
     prelude::{AsyncRead, AsyncWrite},
@@ -301,7 +301,7 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
     })
 }
 
-pub async fn request(writer: impl AsyncWrite, req: Request) -> Result<(), HttpError> {
+pub async fn request(writer: impl AsyncWrite + Send, req: Request) -> Result<(), HttpError> {
     let req_line = format!(
         "{} http://{}:{}{} {}\r\n",
         req.method, req.uri.host, req.uri.port, req.uri.path, req.version
@@ -312,7 +312,7 @@ pub async fn request(writer: impl AsyncWrite, req: Request) -> Result<(), HttpEr
         .and_then(|(writer, _)| {
             iter(req.headers.into_iter()).map(|hdr| hdr + "\r\n").fold(
                 Ok(writer),
-                |acc, hdr| -> std::pin::Pin<Box<dyn Future<Output = _>>> {
+                |acc, hdr| -> std::pin::Pin<Box<dyn Future<Output = _> + Send>> {
                     if let Ok(writer) = acc {
                         io::write_all(writer, hdr)
                             .compat()

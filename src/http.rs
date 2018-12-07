@@ -4,12 +4,9 @@ extern crate futures;
 extern crate proxylab;
 extern crate tokio;
 
-use futures::{compat::*, future::ready, prelude::*, task::SpawnExt};
+use futures::{compat::*, prelude::*, task::SpawnExt};
 use proxylab::*;
-use std::{
-    env::args,
-    io::{BufRead, BufReader},
-};
+use std::{env::args, io::BufReader};
 use tokio::{
     fs, io,
     net::{TcpListener, TcpStream},
