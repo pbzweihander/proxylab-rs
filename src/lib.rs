@@ -270,8 +270,8 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
         loop {
             let (r, chunk_size) = await!(io::read_until(reader, b'\n', vec![]).compat())
                 .map_err(|e| HttpError::Error(format!("chunk size reading failed: {:?}", e)))?;
-            let chunk_size: usize = String::from_utf8_lossy(&chunk_size)
-                .parse()
+            let chunk_size = String::from_utf8_lossy(&chunk_size);
+            let chunk_size = usize::from_str_radix(chunk_size.trim(), 16)
                 .map_err(|e| HttpError::Error(format!("chunk size parsing failed: {:?}", e)))?;
             if chunk_size == 0 {
                 break;
@@ -279,6 +279,8 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
             let (r, mut chunk) = await!(io::read_exact(r, vec![0; chunk_size]).compat())
                 .map_err(|e| HttpError::Error(format!("chunk reading failed: {:?}", e)))?;
             content.append(&mut chunk);
+            let (r, _) = await!(io::read_until(r, b'\n', vec![]).compat())
+                .map_err(|e| HttpError::Error(format!("chunk footer reading failed: {:?}", e)))?;
             reader = r;
         }
         content
