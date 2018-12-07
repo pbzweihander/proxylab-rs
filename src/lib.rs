@@ -20,6 +20,20 @@ use tokio::{
     prelude::{AsyncRead, AsyncWrite},
 };
 
+async fn log(logs: Vec<String>) {
+    use tokio::prelude::stream::iter_ok;
+    use tokio::prelude::{Future, IntoFuture, Stream};
+
+    let stdout = io::stdout();
+
+    let fut =
+        iter_ok(logs.into_iter()).fold(stdout, |stdout, line| {
+            io::write_all(stdout, line+"\r\n").map(|(stdout, _)| stdout)
+        }).map(|_| ()).map_err(|_: io::Error| ());
+
+    await!(tokio::spawn(fut).into_future().compat().map(|_| ()));
+}
+
 #[derive(Debug)]
 pub enum HttpError {
     IsDirectory(String),
@@ -83,6 +97,19 @@ pub struct Request {
     pub headers: Vec<String>,
 }
 
+impl Request {
+    pub async fn log(&self) {
+        let mut logs = vec![format!(
+                "request: {} {} {}",
+                self.method, self.uri.path, self.version
+            )];
+        logs.append(&mut self.headers.clone());
+        logs.push(String::new());
+
+        await!(log(logs));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Response {
     pub version: String,
@@ -90,6 +117,20 @@ pub struct Response {
     pub reason: String,
     pub headers: Vec<String>,
     pub content: Vec<u8>,
+}
+
+impl Response {
+    pub async fn log(&self) {
+        let mut logs = vec![format!(
+                "response: {} {} {}",
+                self.version, self.status, self.reason
+            )];
+        logs.append(&mut self.headers.clone());
+        logs.push(format!("content size: {}", self.content.len()));
+        logs.push(String::new());
+
+        await!(log(logs));
+    }
 }
 
 pub fn get_filetype(filename: &str) -> FileType {

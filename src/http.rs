@@ -56,11 +56,7 @@ async fn doit(stream: TcpStream) -> Result<(), io::Error> {
     }
     let req = req.unwrap();
 
-    println!("request: {} {} {}", req.method, req.uri.path, req.version);
-    for header in req.headers.iter() {
-        println!("{}", header);
-    }
-    println!();
+    await!(req.log());
 
     if req.method != "GET" {
         return await!(client_error(writer, HttpError::NotImplemented(req.method)));

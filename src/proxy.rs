@@ -56,11 +56,7 @@ async fn doit(stream: TcpStream) -> Result<(), io::Error> {
     }
     let req = req.unwrap();
 
-    println!("request: {} {} {}", req.method, req.uri.path, req.version);
-    for header in req.headers.iter() {
-        println!("{}", header);
-    }
-    println!();
+    await!(req.log());
 
     let uri = req.uri.clone();
     let cached_resp = await!(cache::find_cache_block(uri.clone()));
@@ -112,12 +108,7 @@ async fn request_server(req: Request) -> Result<Response, HttpError> {
 
     let resp = Response { headers, ..resp };
 
-    println!("response: {} {} {}", resp.version, resp.status, resp.reason);
-    for header in resp.headers.iter() {
-        println!("{}", header);
-    }
-    println!("content {} bytes served", resp.content.len());
-    println!();
+    await!(resp.log());
 
     Ok(resp)
 }
