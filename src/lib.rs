@@ -10,15 +10,17 @@ pub mod cache;
 
 use futures::{
     future::ready,
+    stream::{iter, unfold},
     {compat::*, prelude::*},
 };
 use regex::Regex;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use tokio::{
     io,
     prelude::{AsyncRead, AsyncWrite},
 };
 
+#[derive(Debug)]
 pub enum HttpError {
     IsDirectory(String),
     Forbidden(String),
@@ -27,6 +29,7 @@ pub enum HttpError {
     Error(String),
 }
 
+#[derive(Debug)]
 pub enum FileType {
     Html,
     Jpg,
@@ -35,10 +38,28 @@ pub enum FileType {
     PlainText,
 }
 
+#[derive(Debug)]
 pub struct Uri {
     pub host: String,
-    pub port: u32,
+    pub port: u16,
     pub path: String,
+}
+
+#[derive(Debug)]
+pub struct Request {
+    pub method: String,
+    pub uri: Uri,
+    pub version: String,
+    pub headers: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct Response {
+    pub version: String,
+    pub status: u16,
+    pub reason: String,
+    pub headers: Vec<String>,
+    pub content: Vec<u8>,
 }
 
 pub fn get_filetype(filename: &str) -> FileType {
@@ -84,7 +105,7 @@ pub fn parse_uri(uri: &str, default_host: &str) -> Option<Uri> {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| 80);
-        let path = caps.get(2).map(|s| ".".to_string() + s.as_str());
+        let path = caps.get(2).map(|s| s.as_str().to_string());
 
         path.map(|p| Uri {
             host: host,
@@ -143,9 +164,185 @@ pub async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), i
     let _ = await!(io::write_all(writer, body).compat())?;
 
     println!(
-        "client error:\n{} {}\n{}: {}\n",
+        "client error:{} {}\n{}: {}\n",
         info.0, info.1, info.2, info.3
     );
+
+    Ok(())
+}
+
+async fn read_headers(
+    reader: impl AsyncRead + BufRead,
+) -> Result<(impl AsyncRead + BufRead, Vec<String>), HttpError> {
+    let mut headers = vec![];
+    let mut reader = reader;
+
+    loop {
+        let (r, header) = await!(io::read_until(reader, b'\n', vec![]).compat())
+            .map_err(|e| HttpError::Error(format!("header reading failed: {:?}", e)))?;
+        reader = r;
+        let header = String::from_utf8_lossy(&header);
+        let header = header.trim();
+        if header.is_empty() {
+            return Ok((reader, headers));
+        }
+        headers.push(header.to_string());
+    }
+}
+
+pub async fn read_request(reader: impl AsyncRead + BufRead) -> Result<Request, HttpError> {
+    let (reader, buf) = await!(io::read_until(reader, b'\n', vec![]).compat())
+        .map_err(|e| HttpError::Error(format!("read failed: {:?}", e)))?;
+
+    let line = String::from_utf8(buf)
+        .map_err(|e| HttpError::Error(format!("decode request failed: {:?}", e)))?;
+    let mut iter = line.split_whitespace();
+
+    let method = iter.next();
+    let uri = iter.next();
+    let version = iter.next();
+
+    let (method, uri, version) = method
+        .and_then(|m| {
+            uri.and_then(|u| version.map(|v| (m.to_string(), u.to_string(), v.to_string())))
+        })
+        .ok_or_else(|| HttpError::Error("request line parsing failed".to_string()))?;
+
+    if method != "GET" {
+        return Err(HttpError::NotImplemented(method.to_string()));
+    }
+
+    let (_, headers) = await!(read_headers(reader))?;
+    let mut request_host = String::new();
+    for header in headers.iter() {
+        if header.starts_with("Host:") {
+            request_host = header
+                .split_whitespace()
+                .nth(1)
+                .map(|s| s.to_string())
+                .ok_or_else(|| HttpError::Error("parse host failed".to_string()))?;
+        }
+    }
+    let uri = parse_uri(&uri, &request_host)
+        .ok_or_else(|| HttpError::Error("parse uri failed".to_string()))?;
+
+    Ok(Request {
+        method,
+        uri,
+        version,
+        headers,
+    })
+}
+
+pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response, HttpError> {
+    let (reader, buf) = await!(io::read_until(reader, b'\n', vec![]).compat())
+        .map_err(|e| HttpError::Error(format!("read failed: {:?}", e)))?;
+
+    let line = String::from_utf8(buf)
+        .map_err(|e| HttpError::Error(format!("decode request failed: {:?}", e)))?;
+    let mut iter = line.split_whitespace();
+
+    let version = iter.next().map(|s| s.to_string());
+    let status = iter.next().and_then(|s| s.parse().ok());
+    let reason = iter.next().map(|s| s.to_string());
+
+    let (version, status, reason) = version
+        .and_then(|v| status.and_then(|s| reason.map(|r| (v, s, r))))
+        .ok_or_else(|| HttpError::Error("status line parsing failed".to_string()))?;
+
+    let (reader, headers) = await!(read_headers(reader))?;
+
+    let mut content_length = 0usize;
+    let mut is_chunked = false;
+    for header in headers.iter() {
+        if header.starts_with("Content-length:") {
+            is_chunked = false;
+            content_length = header
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| HttpError::Error("parse content length failed".to_string()))?;
+        } else if header.starts_with("Transfer-encoding:") && header.contains("chunked") {
+            is_chunked = true;
+            content_length = 0;
+        }
+    }
+
+    let content = if is_chunked {
+        let mut content = Vec::new();
+        let mut reader = reader;
+        loop {
+            let (r, chunk_size) = await!(io::read_until(reader, b'\n', vec![]).compat())
+                .map_err(|e| HttpError::Error(format!("chunk size reading failed: {:?}", e)))?;
+            let chunk_size: usize = String::from_utf8_lossy(&chunk_size)
+                .parse()
+                .map_err(|e| HttpError::Error(format!("chunk size parsing failed: {:?}", e)))?;
+            if chunk_size == 0 {
+                break;
+            }
+            let (r, mut chunk) = await!(io::read_exact(r, vec![0; chunk_size]).compat())
+                .map_err(|e| HttpError::Error(format!("chunk reading failed: {:?}", e)))?;
+            content.append(&mut chunk);
+            reader = r;
+        }
+        content
+    } else {
+        await!(io::read_exact(reader, vec![0; content_length]).compat())
+            .map(|(_, c)| c)
+            .map_err(|e| HttpError::Error(format!("content reading failed: {:?}", e)))?
+    };
+
+    Ok(Response {
+        version,
+        status,
+        reason,
+        headers,
+        content,
+    })
+}
+
+pub async fn request(writer: impl AsyncWrite, req: Request) -> Result<(), HttpError> {
+    let req_line = format!(
+        "{} http://{}:{}{} {}\r\n",
+        req.method, req.uri.host, req.uri.port, req.uri.path, req.version
+    );
+    let fut = io::write_all(writer, req_line).compat();
+
+    let fut = fut
+        .and_then(|(writer, _)| {
+            iter(req.headers.into_iter()).map(|hdr| hdr + "\r\n").fold(
+                Ok(writer),
+                |acc, hdr| -> std::pin::Pin<Box<dyn Future<Output = _>>> {
+                    if let Ok(writer) = acc {
+                        io::write_all(writer, hdr)
+                            .compat()
+                            .map(|r| r.map(|(writer, _)| writer))
+                            .boxed()
+                    } else {
+                        ready(acc).boxed()
+                    }
+                },
+            )
+        })
+        .map_err(|e| HttpError::Error(format!("sending failed: {:?}", e)));
+
+    let _ = await!(fut)?;
+
+    Ok(())
+}
+
+pub async fn response(writer: impl AsyncWrite, resp: Response) -> Result<(), io::Error> {
+    let line = format!("{} {} {}\r\n", resp.version, resp.status, resp.reason);
+
+    let (writer, _) = await!(io::write_all(writer, line).compat())?;
+    let mut writer = writer;
+    for header in resp.headers {
+        let w = writer;
+        let (w, _) = await!(io::write_all(w, header + "\r\n").compat())?;
+        writer = w;
+    }
+    let (writer, _) = await!(io::write_all(writer, b"\r\n").compat())?;
+    let _ = await!(io::write_all(writer, resp.content).compat())?;
 
     Ok(())
 }
