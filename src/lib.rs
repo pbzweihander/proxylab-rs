@@ -14,7 +14,7 @@ use futures::{
     {compat::*, prelude::*},
 };
 use regex::Regex;
-use std::io::BufRead;
+use std::{io::BufRead, iter::once};
 use tokio::{
     io,
     prelude::{AsyncRead, AsyncWrite},
@@ -155,7 +155,7 @@ pub async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), i
     let line = format!("HTTP/1.0 {} {}\r\n", info.0, info.1);
 
     let header = format!(
-        "Content-type: text/html\r\nContent-Length: {}\r\n\r\n",
+        "Content-type: text/html\r\nContent-length: {}\r\n\r\n",
         body.len()
     );
 
@@ -164,7 +164,7 @@ pub async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), i
     let _ = await!(io::write_all(writer, body).compat())?;
 
     println!(
-        "client error:{} {}\n{}: {}\n",
+        "client error: {} {}\n{}: {}\n",
         info.0, info.1, info.2, info.3
     );
 
@@ -303,30 +303,31 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
 
 pub async fn request(writer: impl AsyncWrite + Send, req: Request) -> Result<(), HttpError> {
     let req_line = format!(
-        "{} http://{}:{}{} {}\r\n",
+        "{} http://{}:{}{} {}\r\n\r\n",
         req.method, req.uri.host, req.uri.port, req.uri.path, req.version
     );
     let fut = io::write_all(writer, req_line).compat();
 
     let fut = fut
         .and_then(|(writer, _)| {
-            iter(req.headers.into_iter()).map(|hdr| hdr + "\r\n").fold(
-                Ok(writer),
-                |acc, hdr| -> std::pin::Pin<Box<dyn Future<Output = _> + Send>> {
-                    if let Ok(writer) = acc {
-                        io::write_all(writer, hdr)
-                            .compat()
-                            .map(|r| r.map(|(writer, _)| writer))
-                            .boxed()
-                    } else {
-                        ready(acc).boxed()
-                    }
-                },
-            )
+            iter(req.headers.into_iter().chain(once(String::new())))
+                .map(|hdr| hdr + "\r\n")
+                .fold(
+                    Ok(writer),
+                    |acc, hdr| -> std::pin::Pin<Box<dyn Future<Output = _> + Send>> {
+                        if let Ok(writer) = acc {
+                            io::write_all(writer, hdr)
+                                .compat()
+                                .map(|r| r.map(|(writer, _)| writer))
+                                .boxed()
+                        } else {
+                            ready(acc).boxed()
+                        }
+                    },
+                )
         })
         .map_err(|e| HttpError::Error(format!("sending failed: {:?}", e)));
-
-    let _ = await!(fut)?;
+    await!(fut)?;
 
     Ok(())
 }
