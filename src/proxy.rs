@@ -50,21 +50,32 @@ async fn doit(stream: TcpStream) -> Result<(), io::Error> {
     let (reader, writer) = stream.split();
     let reader = BufReader::new(reader);
 
-    let req_fut = read_request(reader);
-    let resp_fut = req_fut.and_then(|req| {
-        println!("request: {} {} {}", req.method, req.uri.path, req.version);
-        for header in req.headers.iter() {
-            println!("{}", header);
-        }
-        println!();
-
-        request_server(req)
-    });
-    let resp = await!(resp_fut);
-    if let Err(e) = resp {
+    let req = await!(read_request(reader));
+    if let Err(e) = req {
         return await!(client_error(writer, e));
     }
-    let resp = resp.unwrap();
+    let req = req.unwrap();
+
+    println!("request: {} {} {}", req.method, req.uri.path, req.version);
+    for header in req.headers.iter() {
+        println!("{}", header);
+    }
+    println!();
+
+    let uri = req.uri.clone();
+    let cached_resp = await!(cache::find_cache_block(uri.clone()));
+
+    let resp = if let Some(resp) = cached_resp {
+        resp
+    } else {
+        let resp = await!(request_server(req));
+        if let Err(e) = resp {
+            return await!(client_error(writer, e));
+        }
+        resp.unwrap()
+    };
+
+    await!(cache::add_cache_block(uri, resp.clone()));
 
     await!(response(writer, resp))
 }

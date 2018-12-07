@@ -38,14 +38,44 @@ pub enum FileType {
     PlainText,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Uri {
     pub host: String,
     pub port: u16,
     pub path: String,
 }
 
-#[derive(Debug)]
+impl ToString for Uri {
+    fn to_string(&self) -> String {
+        if self.port == 80 {
+            format!("http://{}{}", self.host, self.path)
+        } else {
+            format!("http://{}:{}{}", self.host, self.port, self.path)
+        }
+    }
+}
+
+impl PartialEq for Uri {
+    fn eq(&self, other: &Uri) -> bool {
+        self.to_string().eq(&other.to_string())
+    }
+}
+
+impl Eq for Uri {}
+
+impl PartialOrd for Uri {
+    fn partial_cmp(&self, other: &Uri) -> Option<std::cmp::Ordering> {
+        self.to_string().partial_cmp(&other.to_string())
+    }
+}
+
+impl Ord for Uri {
+    fn cmp(&self, other: &Uri) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Request {
     pub method: String,
     pub uri: Uri,
@@ -53,7 +83,7 @@ pub struct Request {
     pub headers: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Response {
     pub version: String,
     pub status: u16,
@@ -300,12 +330,7 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
 }
 
 pub async fn request(writer: impl AsyncWrite + Send, req: Request) -> Result<(), HttpError> {
-    let url = if req.uri.port == 80 {
-        format!("http://{}{}", req.uri.host, req.uri.path)
-    } else {
-        format!("http://{}:{}{}", req.uri.host, req.uri.port, req.uri.path)
-    };
-    let req_line = format!("{} {} {}\r\n", req.method, url, req.version);
+    let req_line = format!("{} {} {}\r\n", req.method, req.uri.to_string(), req.version);
 
     let fut = io::write_all(writer, req_line).compat();
 
