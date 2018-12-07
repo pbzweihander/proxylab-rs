@@ -106,6 +106,7 @@ async fn request_server(req: Request) -> Result<Response, HttpError> {
         println!("{}", header);
     }
     println!("content {} bytes served", resp.content.len());
+    println!();
 
     Ok(resp)
 }

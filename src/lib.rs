@@ -303,7 +303,7 @@ pub async fn request(writer: impl AsyncWrite + Send, req: Request) -> Result<(),
     } else {
         format!("http://{}:{}{}", req.uri.host, req.uri.port, req.uri.path)
     };
-    let req_line = format!("{} {} {}\r\n\r\n", req.method, url, req.version);
+    let req_line = format!("{} {} {}\r\n", req.method, url, req.version);
 
     let fut = io::write_all(writer, req_line).compat();
 
