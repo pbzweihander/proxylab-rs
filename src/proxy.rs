@@ -92,11 +92,11 @@ async fn request_server(req: Request) -> Result<Response, HttpError> {
         .headers
         .iter()
         .filter(|h| {
-            !h.starts_with("Content-length:")
-                && !(h.starts_with("Transfer-encoding:") && h.contains("chunked"))
+            !h.starts_with("Content-Length:")
+                && !(h.starts_with("Transfer-Encoding:") && h.contains("chunked"))
         })
         .map(|s| s.to_string())
-        .chain(once(format!("Content-length: {}", resp.content.len())))
+        .chain(once(format!("Content-Length: {}", resp.content.len())))
         .collect();
 
     let resp = Response { headers, ..resp };

@@ -95,7 +95,7 @@ async fn serve_static(writer: impl AsyncWrite, filename: String) -> Result<(), i
         reason: "OK".to_string(),
         headers: vec![
             format!(
-                "Content-type: {}",
+                "Content-Type: {}",
                 match file_type {
                     FileType::Gif => "image/gif",
                     FileType::Html => "text/html",
@@ -104,7 +104,7 @@ async fn serve_static(writer: impl AsyncWrite, filename: String) -> Result<(), i
                     FileType::Png => "image/png",
                 }
             ),
-            format!("Content-length: {}", size),
+            format!("Content-Length: {}", size),
         ],
         content,
     };

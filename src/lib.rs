@@ -155,7 +155,7 @@ pub async fn client_error(writer: impl AsyncWrite, e: HttpError) -> Result<(), i
     let line = format!("HTTP/1.0 {} {}\r\n", info.0, info.1);
 
     let header = format!(
-        "Content-type: text/html\r\nContent-length: {}\r\n\r\n",
+        "Content-Type: text/html\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
 
@@ -208,10 +208,6 @@ pub async fn read_request(reader: impl AsyncRead + BufRead) -> Result<Request, H
         })
         .ok_or_else(|| HttpError::Error("request line parsing failed".to_string()))?;
 
-    if method != "GET" {
-        return Err(HttpError::NotImplemented(method.to_string()));
-    }
-
     let (_, headers) = await!(read_headers(reader))?;
     let mut request_host = String::new();
     for header in headers.iter() {
@@ -244,10 +240,10 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
 
     let version = iter.next().map(|s| s.to_string());
     let status = iter.next().and_then(|s| s.parse().ok());
-    let reason = iter.next().map(|s| s.to_string());
+    let reason = iter.map(|s| s.to_string()).collect::<Vec<_>>().join(" ");
 
     let (version, status, reason) = version
-        .and_then(|v| status.and_then(|s| reason.map(|r| (v, s, r))))
+        .and_then(|v| status.map(|s| (v, s, reason)))
         .ok_or_else(|| HttpError::Error("status line parsing failed".to_string()))?;
 
     let (reader, headers) = await!(read_headers(reader))?;
@@ -255,14 +251,14 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
     let mut content_length = 0usize;
     let mut is_chunked = false;
     for header in headers.iter() {
-        if header.starts_with("Content-length:") {
+        if header.starts_with("Content-Length:") {
             is_chunked = false;
             content_length = header
                 .split_whitespace()
                 .nth(1)
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| HttpError::Error("parse content length failed".to_string()))?;
-        } else if header.starts_with("Transfer-encoding:") && header.contains("chunked") {
+        } else if header.starts_with("Transfer-Encoding:") && header.contains("chunked") {
             is_chunked = true;
             content_length = 0;
         }
@@ -302,10 +298,13 @@ pub async fn read_response(reader: impl AsyncRead + BufRead) -> Result<Response,
 }
 
 pub async fn request(writer: impl AsyncWrite + Send, req: Request) -> Result<(), HttpError> {
-    let req_line = format!(
-        "{} http://{}:{}{} {}\r\n\r\n",
-        req.method, req.uri.host, req.uri.port, req.uri.path, req.version
-    );
+    let url = if req.uri.port == 80 {
+        format!("http://{}{}", req.uri.host, req.uri.path)
+    } else {
+        format!("http://{}:{}{}", req.uri.host, req.uri.port, req.uri.path)
+    };
+    let req_line = format!("{} {} {}\r\n\r\n", req.method, url, req.version);
+
     let fut = io::write_all(writer, req_line).compat();
 
     let fut = fut
