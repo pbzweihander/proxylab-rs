@@ -4,7 +4,7 @@ extern crate futures;
 extern crate proxylab;
 extern crate tokio;
 
-use futures::{compat::*, prelude::*, task::SpawnExt};
+use futures::{compat::*, future::ready, prelude::*, task::SpawnExt};
 use proxylab::*;
 use std::{
     env::args,
@@ -38,7 +38,7 @@ fn main() {
             .map_err(|e| eprintln!("accept failed: {:?}", e));
 
         while let Some(Ok(stream)) = await!(incomings.next()) {
-            let handler = doit(stream);
+            let handler = doit(stream).unwrap_or_else(|e| eprintln!("io error: {:?}", e));
             let _ = executor
                 .spawn(handler)
                 .map_err(|e| eprintln!("spawn failed: {:?}", e));
@@ -49,86 +49,70 @@ fn main() {
     tokio::run(server);
 }
 
-async fn doit(stream: TcpStream) {
+async fn doit(stream: TcpStream) -> Result<(), io::Error> {
     let (reader, writer) = stream.split();
     let reader = BufReader::new(reader);
 
-    let file_info = await!(read_request(reader));
-
-    let _ = match file_info {
-        Ok((filename, size)) => await!(serve_static(writer, filename, size)),
-        Err(e) => await!(client_error(writer, e)),
+    let req = await!(read_request(reader));
+    if let Err(e) = req {
+        return await!(client_error(writer, e));
     }
-    .map_err(|e| eprintln!("io error: {:?}", e));
+    let req = req.unwrap();
+
+    println!("request: {} {} {}", req.method, req.uri.path, req.version);
+    for header in req.headers.iter() {
+        println!("{}", header);
+    }
+    println!();
+
+    if req.method != "GET" {
+        return await!(client_error(writer, HttpError::NotImplemented(req.method)));
+    }
+    let filename = ".".to_string() + &req.uri.path;
+
+    await!(serve_static(writer, filename))
 }
 
-async fn read_request(reader: impl AsyncRead + BufRead) -> Result<(String, u64), HttpError> {
-    let (reader, buf) = await!(io::read_until(reader, b'\n', vec![]).compat())
-        .map_err(|e| HttpError::Error(format!("read failed: {:?}", e)))?;
-
-    let line = String::from_utf8(buf)
-        .map_err(|e| HttpError::Error(format!("decode request failed: {:?}", e)))?;
-    let mut iter = line.split_whitespace();
-
-    let method = iter.next();
-    let uri = iter.next();
-    let version = iter.next();
-
-    let (method, uri, version) = method
-        .and_then(|m| {
-            uri.and_then(|u| version.map(|v| (m.to_string(), u.to_string(), v.to_string())))
-        })
-        .ok_or_else(|| HttpError::Error("request line parsing failed".to_string()))?;
-
-    if method != "GET" {
-        return Err(HttpError::NotImplemented(method.to_string()));
+async fn serve_static(writer: impl AsyncWrite, filename: String) -> Result<(), io::Error> {
+    let file = await!(fs::File::open(filename.clone()).compat());
+    if let Err(e) = file {
+        match e.kind() {
+            io::ErrorKind::NotFound => {
+                return await!(client_error(writer, HttpError::NotFound(filename)));
+            }
+            io::ErrorKind::PermissionDenied => {
+                return await!(client_error(writer, HttpError::Forbidden(filename)));
+            }
+            _ => return Err(e),
+        }
     }
-    println!("request:\n{} {} {}", method, uri, version);
-    await!(print_requesthdrs(reader));
-
-    let filename = parse_uri(&uri, "")
-        .map(|uri| uri.path)
-        .ok_or_else(|| HttpError::Error("uri parsing failed".to_string()))?;
-    let metadata = {
-        let filename = filename.clone();
-        await!(fs::metadata(filename.clone()).compat()).map_err(move |e| match e.kind() {
-            io::ErrorKind::NotFound => HttpError::NotFound(filename),
-            io::ErrorKind::PermissionDenied => HttpError::Forbidden(filename),
-            _ => HttpError::Error(format!("file metadata error: {:?}", e)),
-        })?
-    };
-
-    if metadata.is_dir() {
-        return Err(HttpError::IsDirectory(filename));
-    }
-
-    Ok((filename, metadata.len()))
-}
-
-async fn serve_static(
-    writer: impl AsyncWrite,
-    filename: String,
-    size: u64,
-) -> Result<(), io::Error> {
-    let file = await!(fs::File::open(filename.clone()).compat())?;
+    let file = file.unwrap();
     let file_type = get_filetype(&filename);
 
-    let line = "HTTP/1.0 200 OK\r\n".to_string();
-    let header = format!(
-        "Content-type: {}\r\nContent-Length: {}\r\n\r\n",
-        match file_type {
-            FileType::Gif => "image/gif",
-            FileType::Html => "text/html",
-            FileType::Jpg => "image/jpg",
-            FileType::PlainText => "text/plain",
-            FileType::Png => "image/png",
-        },
-        size
-    );
+    let (_, content) = await!(io::read_to_end(file, vec![]).compat())?;
+    let size = content.len();
 
-    let (writer, _) = await!(io::write_all(writer, line).compat())?;
-    let (writer, _) = await!(io::write_all(writer, header).compat())?;
-    let _ = await!(io::copy(file, writer).compat())?;
+    let resp = Response {
+        version: "HTTP/1.0".to_string(),
+        status: 200,
+        reason: "OK".to_string(),
+        headers: vec![
+            format!(
+                "Content-type: {}",
+                match file_type {
+                    FileType::Gif => "image/gif",
+                    FileType::Html => "text/html",
+                    FileType::Jpg => "image/jpg",
+                    FileType::PlainText => "text/plain",
+                    FileType::Png => "image/png",
+                }
+            ),
+            format!("Content-length: {}", size),
+        ],
+        content,
+    };
+
+    await!(response(writer, resp))?;
 
     println!("file {} size {} served\n", filename, size);
 
